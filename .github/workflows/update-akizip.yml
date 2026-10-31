@@ -1,0 +1,56 @@
+name: Update Akizip
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # daily at 04:17 UTC
+  workflow_dispatch: # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for a new Akizip release
+        id: check
+        run: |
+          latest=$(git ls-remote --tags --refs --sort=-v:refname \
+                     https://github.com/AkiZip/AkiZip.git \
+                   | head -n1 | sed 's|.*refs/tags/||')
+          current=$(grep -oP 'version = "\K[^"]+' flake.nix)
+          echo "current=$current latest=$latest"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ -n "$latest" ] && [ "$latest" != "$current" ]; then
+            echo "update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version and hash
+        if: steps.check.outputs.update == 'true'
+        env:
+          TAG: ${{ steps.check.outputs.latest }}
+        run: |
+          hash=$(nix flake prefetch "github:AkiZip/AkiZip/$TAG" --json | jq -r .hash)
+          sed -i "s|version = \"[^\"]*\";|version = \"$TAG\";|" flake.nix
+          sed -i "s|hash = \"sha256-[^\"]*\";|hash = \"$hash\";|" flake.nix
+          git diff
+
+      - name: Build to make sure it still works
+        if: steps.check.outputs.update == 'true'
+        run: nix build -L .#akizip
+
+      - name: Commit and push
+        if: steps.check.outputs.update == 'true'
+        env:
+          TAG: ${{ steps.check.outputs.latest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "akizip: update to $TAG"
+          git push
